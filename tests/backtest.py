@@ -135,6 +135,7 @@ def run(files: list, scheme: str, params: dict, verbose: bool = True) -> dict:
     }
     totals = {name: [0.0, 0, 0, 0] for name in forecasters}
     slowest = 0.0
+    made_cases = 0
     for path in files:
         world = json.loads(Path(path).read_text(encoding="utf-8"))
         for cut, target in cuts_for(world, scheme):
@@ -142,6 +143,7 @@ def run(files: list, scheme: str, params: dict, verbose: bool = True) -> dict:
             if made is None:
                 continue
             case, answer = made
+            made_cases += 1
             line = [f"{Path(path).stem:>22} cut {cut:6.1f}h -> {target:6.1f}h"]
             for name, fn in forecasters.items():
                 started = time.perf_counter()
@@ -157,6 +159,9 @@ def run(files: list, scheme: str, params: dict, verbose: bool = True) -> dict:
                 line.append(f"{name} {loss / max(items, 1):.4f}")
             if verbose:
                 print("  ".join(line))
+    if not made_cases:
+        print(f"scheme {scheme}: no cut of these histories has an answering read inside them; nothing scored")
+        return {}
     summary = {}
     for name, (loss, items, covered, scored) in totals.items():
         summary[name] = (loss / max(items, 1), covered / max(scored, 1))

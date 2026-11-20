@@ -69,6 +69,9 @@ PARAMS = {
     "slope_cap_q": 0.9,
     # Whether the platinum's quantiles are held at or below every other trophy's (it needs them all).
     "platinum_cap": True,
+    # Share of the in-history error shape (vs. the normal's) in the five z values, and the items it needs.
+    "shape_share": 0.5,
+    "shape_min_items": 100.0,
 }
 
 LINKS = ("logit", "probit")
@@ -180,6 +183,7 @@ class Calibration:
         self.decay = None
         self.k_group = {}
         self.k_trophy = {}
+        self.zs = None
         self.cuts = 0
 
 
@@ -260,7 +264,35 @@ def calibrate(refreshes: list, n: int, pools: list, params: dict) -> Calibration
         cal.k_group[pool] = math.sqrt(sum(min(v, cap) for v in ordered) / len(ordered))
     for i, values in per_trophy.items():
         cal.k_trophy[i] = math.sqrt(sum(values) / len(values))
+    # The shape of the errors once each is divided by the spread the model gives it.
+    standardized = []
+    for by_link, x_end, truth in cuts:
+        states = by_link["logit"][0]
+        for i in range(n):
+            st = states[i]
+            if st.anchor is None or truth[i] is None or x_end - st.x_last <= 1e-6:
+                continue
+            err = truth[i] - median_logit(by_link, i, cal.link, cal.decay, x_end)
+            sigma = _sigma(st, _growth(cal, i, pools[i], params), x_end - st.x_last, params)
+            standardized.append(err / sigma)
+    if len(standardized) >= params["shape_min_items"]:
+        cal.zs = _shape(standardized, params["shape_share"])
     return cal
+
+
+def _shape(standardized: list, share: float) -> list:
+    """Five z values: the standardized errors' quantiles about their median, shrunk toward the normal's."""
+    centre = trend.quantile(standardized, 0.5)
+    out = []
+    for level, z_normal in zip(quantiles.LEVELS, quantiles.Z):
+        if level == 0.5:
+            out.append(0.0)
+            continue
+        empirical = trend.quantile(standardized, level) - centre
+        size = abs(empirical) / abs(z_normal)
+        size = min(2.0, max(0.4, size)) if empirical * z_normal > 0 else 0.4
+        out.append(z_normal * (share * size + (1.0 - share)))
+    return out
 
 
 def _count_variance(pct: float, players: float) -> float:
@@ -269,6 +301,12 @@ def _count_variance(pct: float, players: float) -> float:
         return 0.0
     p = series.clamp(pct) / 100.0
     return 1.0 / max(players * p * (1.0 - p), 1.0)
+
+
+def _sigma(st: TrophyState, k: float, dx: float, params: dict) -> float:
+    """The model's logit spread for a trophy over dx, before the safety margin."""
+    var = st.scale ** 2 + (k * dx) ** 2 + _count_variance(st.last_pct, st.players)
+    return max(math.sqrt(var), params["sigma_floor"])
 
 
 def _growth(cal: Calibration, i: int, pool: str, params: dict) -> float:
@@ -307,10 +345,8 @@ def forecast_case(case: dict, params: dict = None) -> dict:
             continue
         dx = max(x_target - st.x_last, 0.0)
         centre = median_logit(by_link, i, choice, lam, x_target)
-        k = _growth(cal, i, pools[i], params)
-        var = st.scale ** 2 + (k * dx) ** 2 + _count_variance(st.last_pct, st.players)
-        sigma = max(math.sqrt(var), params["sigma_floor"]) * params["margin"]
-        rows.append(quantiles.row(trophy["id"], centre, sigma, sigma))
+        sigma = _sigma(st, _growth(cal, i, pools[i], params), dx, params) * params["margin"]
+        rows.append(quantiles.row(trophy["id"], centre, sigma, sigma, cal.zs))
     if params["platinum_cap"]:
         _cap_platinum(trophies, rows)
     return {"trophies": rows}

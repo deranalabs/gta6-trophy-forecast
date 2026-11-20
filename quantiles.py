@@ -1,9 +1,9 @@
 # Turns a logit median and two side spreads into five valid percent quantiles, and validates whole forecasts.
 """Quantile rows.
 
-A row is a two-piece normal on the logit scale: below the median the spread is sigma_down, above it sigma_up. The
-quantiles are mapped back to percent, rounded to 4 decimals half up (as the starter rounds), held to 0..100, and made
-non-decreasing after rounding.
+A row is a two-piece normal on the logit scale: below the median the spread is sigma_down, above it sigma_up, and
+the five z values may be replaced by a calibrated shape. The quantiles are mapped back to percent, rounded to 4
+decimals half up (as the starter rounds), held to 0..100, and made non-decreasing after rounding.
 """
 
 import math
@@ -41,12 +41,14 @@ def tidy(values: list) -> list:
     return out
 
 
-def row(trophy_id, centre: float, sigma_down: float, sigma_up: float) -> dict:
+def row(trophy_id, centre: float, sigma_down: float, sigma_up: float, zs: list = None) -> dict:
+    """zs, when given, replaces the normal's five z values (a calibrated shape; the middle one should be 0)."""
     centre = _safe(centre, 0.0)
     sigma_down = max(_safe(sigma_down, 1.0), 0.0)
     sigma_up = max(_safe(sigma_up, 1.0), 0.0)
     values = []
-    for z in Z:
+    for z in zs or Z:
+        z = _safe(z, 0.0)
         spread = sigma_down if z < 0 else sigma_up
         values.append(series.inv_logit(centre + z * spread))
     return {"id": trophy_id, "q": tidy(values)}
