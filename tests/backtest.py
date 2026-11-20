@@ -17,7 +17,6 @@ Schemes:
 """
 
 import json
-import math
 import sys
 import time
 from datetime import timedelta
@@ -115,10 +114,14 @@ def parse_sets(items: list) -> dict:
         if key not in params:
             raise SystemExit(f"unknown parameter {key}")
         old = params[key]
-        if isinstance(old, tuple):
+        if isinstance(old, tuple) and old and isinstance(old[0], str):
+            params[key] = tuple(raw.split(","))
+        elif isinstance(old, tuple):
             params[key] = tuple(float(v) for v in raw.split(","))
         elif isinstance(old, bool):
             params[key] = raw.lower() in ("1", "true", "yes")
+        elif isinstance(old, str):
+            params[key] = raw
         else:
             params[key] = float(raw)
     return params
@@ -180,10 +183,7 @@ def main() -> None:
             files.append(arg)
     if not files:
         raise SystemExit(__doc__)
-    params = parse_sets(sets)
-    if math.isnan(sum(v for v in params.values() if isinstance(v, float))):
-        raise SystemExit("bad parameter")
-    run(files, scheme, params, verbose=not quiet)
+    run(files, scheme, parse_sets(sets), verbose=not quiet)
 
 
 if __name__ == "__main__":
