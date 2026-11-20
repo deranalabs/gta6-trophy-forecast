@@ -1,33 +1,12 @@
-"""gta6-trophy-rarity-forecast-01's starter in Python 3.13 (standard library only): persistence.
+# Entry point: reads every case in the input directory, in name order, and writes one validated forecast for each.
+"""GTA VI trophy earn-rate forecast (make.fun gta6-trophy-rarity-forecast-01), Python 3.13 standard library only.
 
-The same program as starter/main.ts (the house baseline), number for number: it forecasts that every trophy's earn rate
-on Exophase at the case's target is the rate in the case's last read, with a spread that widens like a random walk's on
-the logit scale:
+Run by the grader as `python3 -P -s /bot/main.py` with PYTHONHASHSEED=0. -P keeps this file's directory off sys.path,
+so it is put back first, before the sibling modules are imported. Locally, MAKEFUN_INPUT_DIR and MAKEFUN_OUTPUT_DIR
+stand in for /input and /output.
 
-    q_tau = 100 / (1 + exp(-(logit(r) + z_tau * 0.5 * sqrt(d)))), rounded to 4 decimals (half up)
-
-for each trophy, where r is its rate in the last read of the case's history (percent, clamped to 0.01..99.99 before the
-logit), d the case's horizon in days (horizon_minutes / 1440) and z_tau the standard normal's quantile at each level
-(0.05, 0.25, 0.5, 0.75, 0.95): -1.645, -0.674, 0, 0.674, 1.645.
-
-How the grader runs it: `python3 -P -s /bot/main.py` (PYTHONHASHSEED=0) in python:3.13-slim, standard library only: no
-network, no pip packages. -P keeps this file's directory OFF sys.path, so a module you ship beside main.py (say
-/bot/model.py) imports only after the sys.path line below, which puts the directory first; -s drops user
-site-packages.
-
-What an entry must do:
-  - read every <id>.in in the input directory (the grader runs one case at a time, with only that case's file there):
-    JSON {"schema": "makefun/gta6-trophies-case/v1", "id", "at", "horizon_minutes", "target", "levels", "game",
-    "trophies", "history", "notes"}, where `trophies` lists the case's trophies {id, name, description, tier, points,
-    secret} and `history` every read before `at`, oldest first, each {slot, at, players_tracked, trophies_earned,
-    rates}, `rates` in the order of `trophies` (null where that read lacked the trophy);
-  - write <id>.out to the output directory: {"trophies": [{"id": 1, "q": [q05, q25, q50, q75, q95]}, ...]}, one row
-    for each of the case's trophies, each id once, no other key, each q five finite numbers from 0 to 100 (percent),
-    non-decreasing; at most 65,536 bytes. Anything else is an invalid case, scored as if every quantile equalled the
-    trophy's rate in the last read, and an entry with an invalid case takes no prize.
-
-Outside the grader's container, MAKEFUN_INPUT_DIR and MAKEFUN_OUTPUT_DIR stand in for /input and /output:
-    mkdir -p out && MAKEFUN_INPUT_DIR=input MAKEFUN_OUTPUT_DIR=out python3 main.py
+Each case goes through model.forecast_case. If that raises or returns anything the contest would not accept, the case
+falls back to persistence with a random-walk spread (the house baseline's formula), so every case file written is valid.
 """
 
 import json
@@ -36,63 +15,61 @@ import os
 import sys
 from pathlib import Path
 
-# The grader's -P leaves /bot off sys.path: put it back first, so `import model` finds a model.py shipped beside this file.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import model  # noqa: E402
+import quantiles  # noqa: E402
+import series  # noqa: E402
 
 INPUT_DIR = Path(os.environ.get("MAKEFUN_INPUT_DIR", "/input"))
 OUTPUT_DIR = Path(os.environ.get("MAKEFUN_OUTPUT_DIR", "/output"))
-
-# The quantile levels the contest scores, in the order each row lists them.
-LEVELS = [0.05, 0.25, 0.5, 0.75, 0.95]
-# The standard normal's quantile at each level.
-Z = [-1.645, -0.674, 0, 0.674, 1.645]
-# The spread of a rate's move, in logit units per square-root day.
-SIGMA = 0.5
+# Random-walk spread of the fallback, logit units per square-root day.
+FALLBACK_SIGMA = 0.5
 
 
-def clamp(x: float) -> float:
-    return min(99.99, max(0.01, x))
+def last_rates(case: dict, n: int) -> list:
+    """Each trophy's latest non-null rate in the history, None where it never had one."""
+    out = [None] * n
+    for read in case.get("history") or []:
+        for i, value in enumerate((read.get("rates") or [])[:n]):
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+                out[i] = float(value)
+    return out
 
 
-def logit(pct: float) -> float:
-    return math.log(clamp(pct) / (100 - clamp(pct)))
-
-
-def round4(x: float) -> float | int:
-    """x rounded to 4 decimals, half up, as JavaScript's Math.round(x * 10000) / 10000 rounds it.
-
-    A whole number comes back as an int, so json.dumps writes 100 where JavaScript writes 100 (not 100.0).
-    """
-    scaled = x * 10000
-    whole = math.floor(scaled)
-    if scaled - whole >= 0.5:
-        whole += 1
-    value = whole / 10000
-    return int(value) if value.is_integer() else value
-
-
-def forecast_case(case: dict, name: str) -> dict:
-    if case["levels"] != LEVELS:
-        raise ValueError(f"{name} asks for levels {case['levels']}, not {LEVELS}")
-    if not case["history"]:
-        raise ValueError(f"{name} has no history")
-    last = case["history"][-1]
-    spread = SIGMA * math.sqrt(case["horizon_minutes"] / 1440)
+def fallback(case: dict) -> dict:
+    trophies = case.get("trophies") or []
+    rates = last_rates(case, len(trophies))
+    try:
+        days = max(float(case.get("horizon_minutes", 0)) / 1440.0, 0.0)
+    except (TypeError, ValueError):
+        days = 0.0
+    spread = FALLBACK_SIGMA * math.sqrt(days) if days > 0 else FALLBACK_SIGMA
     rows = []
-    for i, trophy in enumerate(case["trophies"]):
-        rate = last["rates"][i]
-        lg = logit(rate if rate is not None else 0)
-        rows.append({"id": trophy["id"], "q": [round4(100 / (1 + math.exp(-(lg + z * spread)))) for z in Z]})
+    for trophy, rate in zip(trophies, rates):
+        centre = series.logit(rate if rate is not None else 1.0)
+        rows.append(quantiles.row(trophy["id"], centre, spread, spread))
     return {"trophies": rows}
+
+
+def forecast(case: dict) -> dict:
+    ids = [t["id"] for t in case.get("trophies") or []]
+    try:
+        result = model.forecast_case(case)
+        if quantiles.is_valid(result, ids):
+            return result
+    except Exception:  # noqa: BLE001 - any failure of the model falls back to a valid forecast
+        pass
+    return fallback(case)
 
 
 def main() -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    # Every case file, in name order, so two runs write the same bytes.
     for path in sorted(INPUT_DIR.glob("*.in")):
         case = json.loads(path.read_text(encoding="utf-8"))
-        forecast = forecast_case(case, path.name)
-        (OUTPUT_DIR / f"{path.stem}.out").write_text(json.dumps(forecast, separators=(",", ":")) + "\n", encoding="utf-8")
+        result = forecast(case)
+        text = json.dumps(result, separators=(",", ":")) + "\n"
+        (OUTPUT_DIR / f"{path.stem}.out").write_text(text, encoding="utf-8")
 
 
 if __name__ == "__main__":

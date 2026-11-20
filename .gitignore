@@ -1,0 +1,4 @@
+# Keeps interpreter caches and local run outputs out of the repository.
+__pycache__/
+*.pyc
+out/
